@@ -1,0 +1,15 @@
+{
+    "name": "arman/schedule-bot",
+    "description": "Telegram bot with Excel schedule",
+    "type": "project",
+    "authors": [
+        {
+            "name": "Arman"
+        }
+    ],
+    "require": {
+        "phpoffice/phpspreadsheet": "^5.3",
+        "telegram-bot/api": "^2.5",
+        "irazasyed/telegram-bot-sdk": "^3.15"
+    }
+}
