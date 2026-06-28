@@ -1,132 +1,155 @@
 <?php
+echo "Я — bot_longpoll.php — я живой! " . date('H:i:s') . "\n";
 require __DIR__ . '/vendor/autoload.php';
 
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use Telegram\Bot\Api;
 
-// === НАСТРОЙКИ ===
 $telegramToken = '8209966982:AAGL6z6ivxS3qtkZlUx0TPHPpiYD0HR5BX0';
 $excelFile     = 'Book 2.xlsx';
+$cacheFile     = __DIR__ . '/schedule_cache.json';
 
-// === ФУНКЦИЯ ПОИСКА РАСПИСАНИЯ ===
-function getScheduleForPerson(string $firstName, string $lastName, string $file): array
+$telegram = new Api($telegramToken);
+
+// Кэширование Excel
+function getTableData(): array
 {
-    $fullName = mb_strtoupper(trim($firstName . ' ' . $lastName));
+    global $cacheFile, $excelFile;
+
+    if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < 300) {
+        return json_decode(file_get_contents($cacheFile), true);
+    }
 
     try {
-        $spreadsheet = IOFactory::load($file);
+        $spreadsheet = IOFactory::load($excelFile);
+        $sheet = $spreadsheet->getActiveSheet();
+        $rows = $sheet->toArray();
+
+        $data = ['orig' => $rows, 'norm' => []];
+        foreach ($rows as $row) {
+            $normRow = array_map(function($cell) {
+                $cell = trim($cell ?? '');
+                $cell = preg_replace('/\s+/u', ' ', $cell);
+                return mb_strtoupper($cell, 'UTF-8');
+            }, $row);
+            $data['norm'][] = $normRow;
+        }
+
+        file_put_contents($cacheFile, json_encode($data, JSON_UNESCAPED_UNICODE));
+        return $data;
     } catch (Exception $e) {
-        return [];
+        return ['orig' => [], 'norm' => []];
     }
+}
 
-    $worksheet = $spreadsheet->getActiveSheet();
-    $rows = $worksheet->toArray();
-    if (empty($rows)) return [];
+function findSchedule(string $text): array
+{
+    $text = trim(preg_replace('/\s+/', ' ', $text));
+    if ($text === '') return [];
 
-    $headers = array_map('mb_strtoupper', array_map('trim', $rows[0]));
+    $words = array_filter(explode(' ', mb_strtoupper($text, 'UTF-8')));
+    $data = getTableData();
 
-    $colName    = array_search('ИМЯ', $headers);
-    $colSurname = array_search('ФАМИЛИЯ', $headers);
-    $colDate    = array_search('ДАТА', $headers);
-    $colTime    = array_search('ВРЕМЯ ВЫХОДА', $headers);
+    $normRows = $data['norm'];
+    $origRows = $data['orig'];
+    $matches = [];
 
-    if ($colName === false || $colSurname === false || $colDate === false || $colTime === false) {
-        return [];
-    }
+    foreach ($normRows as $i => $row) {
+        if ($i === 0) continue;
+        $rowText = implode(' ', $row);
 
-    $result = [];
-    foreach ($rows as $index => $row) {
-        if ($index === 0) continue;
-
-        $name    = mb_strtoupper(trim($row[$colName] ?? ''));
-        $surname = mb_strtoupper(trim($row[$colSurname] ?? ''));
-        $full    = $name . ' ' . $surname;
-
-        if ($full === $fullName) {
-            $date = trim($row[$colDate] ?? '');
-            $time = trim($row[$colTime] ?? '');
-            if ($date) {
-                $result[] = ['date' => $date, 'time' => $time];
-            }
+        $found = 0;
+        foreach ($words as $w) {
+            if (strpos($rowText, $w) !== false) $found++;
+        }
+        if ($found > 0) {
+            $matches[] = $i;
         }
     }
 
-    usort($result, fn($a, $b) => strtotime($a['date']) <=> strtotime($b['date']));
+    if (empty($matches)) return [];
+
+    // Находим колонки с датой и временем
+    $header = $normRows[0] ?? [];
+    $dateCol = $timeCol = -1;
+    foreach ($header as $i => $h) {
+        if (in_array($h, ['ДАТА', 'DATE', 'ДЕНЬ'])) $dateCol = $i;
+        if (in_array($h, ['ВРЕМЯ', 'ЧАСЫ', 'СМЕНА', 'TIME', 'ВРЕМЯ ВЫХОДА'])) $timeCol = $i;
+    }
+    if ($dateCol === -1 || $timeCol === -1) return [];
+
+    $result = [];
+    foreach ($matches as $i) {
+        $row = $origRows[$i];
+        $date = trim($row[$dateCol] ?? '');
+        $time = trim($row[$timeCol] ?? '');
+        if ($date && $time) {
+            $result[] = ['date' => $date, 'time' => $time];
+        }
+    }
+
+    usort($result, fn($a,$b) => strtotime($a['date']) <=> strtotime($b['date']));
     return $result;
 }
 
-// === ОСНОВНАЯ ЛОГИКА БОТА ===
-try {
-    $telegram = new Api($telegramToken);
-    $update   = $telegram->getWebhookUpdate();  // это Illuminate Collection
+// === LONGPOLL ===
+echo "Умный бот запущен! Нажми Ctrl+C чтобы остановить.\n";
 
-    // Правильное получение message, chat_id и текста в этой библиотеке
-    $message = $update['message'] ?? null;
-    if (!$message) exit;
+$offset = 0;
+while (true) {
+    try {
+        $updates = $telegram->getUpdates(['offset' => $offset, 'timeout' => 30]);
+        foreach ($updates as $update) {
+            $updateId = $update->getUpdateId();
+            if ($updateId >= $offset) $offset = $updateId + 1;
 
-    $chatId = $message['chat']['id'] ?? null;
-    if (!$chatId) exit;
+            $msg = $update->getMessage();
+            if (!$msg) continue;
 
-    $text = trim($message['text'] ?? '');
+            $chatId = $msg->getChat()->getId();
+            $text   = trim($msg->getText() ?? '');
 
-    if ($text === '/start') {
-        $keyboard = [
-            'keyboard'          => [['Показать моё расписание']],
-            'resize_keyboard'   => true,
-            'one_time_keyboard' => false,
-        ];
-
-        $telegram->sendMessage([
-            'chat_id'      => $chatId,
-            'text'         => "Привет! Нажми кнопку ниже или введи своё имя и фамилию (например: Иван Иванов)",
-            'reply_markup' => json_encode($keyboard),
-        ]);
-        exit;
-    }
-
-    if (mb_stripos($text, 'показать моё расписание') !== false || $text === '/schedule') {
-        $telegram->sendMessage([
-            'chat_id' => $chatId,
-            'text'    => "Введи имя и фамилию точно как в таблице (например: Иван Иванов):",
-        ]);
-        exit;
-    }
-
-    if (preg_match('/^([А-ЯЁа-яёA-Za-z-]+)\s+([А-ЯЁа-яёA-Za-z-]+)$/u', $text, $m)) {
-        $firstName = $m[1];
-        $lastName  = $m[2];
-
-        $schedule = getScheduleForPerson($firstName, $lastName, $excelFile);
-
-        if (empty($schedule)) {
-            $telegram->sendMessage([
-                'chat_id' => $chatId,
-                'text'    => "Ничего не найдено по «{$firstName} {$lastName}». Проверь написание и регистр.",
-            ]);
-        } else {
-            $response = "*Твоё расписание:*\n\n";
-            foreach ($schedule as $item) {
-                $date = date('d.m.Y', strtotime($item['date']));
-                $days = ['Monday' => 'Понедельник', 'Tuesday' => 'Вторник', 'Wednesday' => 'Среда',
-                         'Thursday' => 'Четверг', 'Friday' => 'Пятница', 'Saturday' => 'Суббота', 'Sunday' => 'Воскресенье'];
-                $dayRu = $days[date('l', strtotime($item['date']))] ?? date('l', strtotime($item['date']));
-                $response .= "📅 {$date} ({$dayRu}) — 🕑 {$item['time']}\n";
+            if ($text === '/start') {
+                $kb = ['keyboard' => [['Моё расписание']], 'resize_keyboard' => true];
+                $telegram->sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => "Привет! Напиши имя или фамилию — я найду твоё расписание!",
+                    'reply_markup' => json_encode($kb)
+                ]);
+                continue;
             }
 
-            $telegram->sendMessage([
-                'chat_id'    => $chatId,
-                'text'       => $response,
-                'parse_mode' => 'Markdown',
-            ]);
-        }
-    } else {
-        $telegram->sendMessage([
-            'chat_id' => $chatId,
-            'text'    => "Пожалуйста, введи имя и фамилию через пробел (например: Иван Иванов)",
-        ]);
-    }
-} catch (Exception $e) {
-    error_log('Bot error: ' . $e->getMessage());
-}
+            if (stripos($text, 'расписание') !== false) {
+                $telegram->sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => "Просто напиши своё имя или фамилию"
+                ]);
+                continue;
+            }
 
-echo "OK";
+            $sched = findSchedule($text);
+
+            if (empty($sched)) {
+                $telegram->sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => "Ничего не нашёл по «{$text}»"
+                ]);
+            } else {
+                $out = "*Твоё расписание:*\n\n";
+                foreach ($sched as $s) {
+                    $d = date('d.m.Y', strtotime($s['date']));
+                    $wd = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][date('w', strtotime($s['date']))];
+                    $out .= "• {$d} ({$wd}) — {$s['time']}\n";
+                }
+                $telegram->sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => $out,
+                    'parse_markup' => 'Markdown'
+                ]);
+            }
+        }
+    } catch (Exception $e) {
+        error_log($e->getMessage());
+        sleep(2);
+    }
+}
