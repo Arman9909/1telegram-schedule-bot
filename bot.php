@@ -5,7 +5,7 @@ require __DIR__ . '/vendor/autoload.php';
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use Telegram\Bot\Api;
 
-$telegramToken = '8209966982:AAGL6z6ivxS3qtkZlUx0TPHPpiYD0HR5BX0';
+$telegramToken = '8209966982:AAEqlRYGxNiZEZetCNz36IwD1ILwnGLwrv4';
 $excelFile     = 'Book 2.xlsx';
 $cacheFile     = __DIR__ . '/schedule_cache.json';
 
